@@ -4,6 +4,8 @@ Modified by Erik Härkönen, 29.11.2019
 '''
 
 import numbers
+
+import numpy as np
 import torch
 from netdissect.autoeval import autoimport_eval
 from netdissect.progress import print_progress
@@ -110,6 +112,16 @@ def create_instrumented_model(args, **kwargs):
 def annotate_model_shapes(model, gen=False, imgsize=None, latent_shape=None):
     assert (imgsize is not None) or gen
 
+    print(model.model.__class__.__name__)
+
+    if model.model.__class__.__name__ == 'VAELightningModule':
+        print("Annotating shapes")
+        print(model.model)
+
+        model.input_shape = [1, 128]
+        model.feature_shape = { 'model.decoder_input': torch.empty(1, 128).size()}
+        model.output_shape = torch.empty(1,3,64,64).size()
+        return model
     # Figure the input shape.
     if gen:
         if latent_shape is None:
@@ -137,6 +149,12 @@ def annotate_model_shapes(model, gen=False, imgsize=None, latent_shape=None):
         output = model(dry_run)
 
     # Annotate shapes.
+    print("Annotating shapes")
+    print(model.model.__class__.__name__)
+
+    print(f'input_shape: {type(input_shape)}')
+    print(f'feature_shape: {str({ layer: type(feature.shape) for layer, feature in model.retained_features().items() })}')
+    print(f'output_shape: {type(output.shape)}')
     model.input_shape = input_shape
     model.feature_shape = { layer: feature.shape
             for layer, feature in model.retained_features().items() }

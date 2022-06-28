@@ -18,11 +18,17 @@ from types import SimpleNamespace
 from utils import download_ckpt
 from config import Config
 from netdissect import proggan, zdataset
+import sys
+# insert at 1, 0 is the script path (or '' in REPL)
+from .vanilla_vae import VanillaVAE
+from .vanilla_vae.vae_lightning_model import VAELightningModule
 from . import biggan
 from . import stylegan
 from . import stylegan2
 from abc import abstractmethod, ABC as AbstractBaseClass
 from functools import singledispatch
+from os.path import dirname, abspath
+
 
 class BaseModel(AbstractBaseClass, torch.nn.Module):
 
@@ -534,15 +540,15 @@ class BigGAN(BaseModel):
 
     # Default implementaiton fails without an internet
     # connection, even if the model has been cached
-    def load_model(self, name):        
+    def load_model(self, name):
         if name not in biggan.model.PRETRAINED_MODEL_ARCHIVE_MAP:
             raise RuntimeError('Unknown BigGAN model name', name)
-        
+
         checkpoint_root = os.environ.get('GANCONTROL_CHECKPOINT_DIR', Path(__file__).parent / 'checkpoints')
         model_path = Path(checkpoint_root) / name
 
         os.makedirs(model_path, exist_ok=True)
-        
+
         model_file = model_path / biggan.model.WEIGHTS_NAME
         config_file = model_path / biggan.model.CONFIG_NAME
         model_url = biggan.model.PRETRAINED_MODEL_ARCHIVE_MAP[name]
@@ -561,11 +567,12 @@ class BigGAN(BaseModel):
 
     def sample_latent(self, n_samples=1, truncation=None, seed=None):
         if seed is None:
-            seed = np.random.randint(np.iinfo(np.int32).max) # use (reproducible) global rand state
-        
-        noise_vector = biggan.truncated_noise_sample(truncation=truncation or self.truncation, batch_size=n_samples, seed=seed)
-        noise = torch.from_numpy(noise_vector) #[N, 128] 
-        
+            seed = np.random.randint(np.iinfo(np.int32).max)  # use (reproducible) global rand state
+
+        noise_vector = biggan.truncated_noise_sample(truncation=truncation or self.truncation, batch_size=n_samples,
+                                                     seed=seed)
+        noise = torch.from_numpy(noise_vector)  # [N, 128]
+
         return noise.to(self.device)
 
     # One extra for gen_z
@@ -577,7 +584,7 @@ class BigGAN(BaseModel):
 
     def set_conditional_state(self, z, c):
         self.v_class = c
-    
+
     def is_valid_class(self, class_id):
         if isinstance(class_id, int):
             return class_id < 1000
@@ -595,16 +602,16 @@ class BigGAN(BaseModel):
             self.v_class = torch.from_numpy(biggan.one_hot_from_names([class_id])).to(self.device)
         else:
             raise RuntimeError(f'Unknown class identifier {class_id}')
-    
-    def forward(self, x):        
+
+    def forward(self, x):
         # Duplicate along batch dimension
         if isinstance(x, list):
             c = self.v_class.repeat(x[0].shape[0], 1)
-            class_vector = len(x)*[c]
+            class_vector = len(x) * [c]
         else:
             class_vector = self.v_class.repeat(x.shape[0], 1)
         out = self.model.forward(x, class_vector, self.truncation)  # [N, 3, 128, 128], in [-1, 1]
-        return 0.5*(out+1)
+        return 0.5 * (out + 1)
 
     # Run model only until given layer
     # Used to speed up PCA sample collection
@@ -618,17 +625,18 @@ class BigGAN(BaseModel):
             n_layers = len(self.model.config.layers)
 
         if not isinstance(x, list):
-            x = self.model.n_latents*[x]
+            x = self.model.n_latents * [x]
 
         if isinstance(self.v_class, list):
             labels = [c.repeat(x[0].shape[0], 1) for c in class_label]
             embed = [self.model.embeddings(l) for l in labels]
         else:
             class_label = self.v_class.repeat(x[0].shape[0], 1)
-            embed = len(x)*[self.model.embeddings(class_label)]
-        
+            embed = len(x) * [self.model.embeddings(class_label)]
+
         assert len(x) == self.model.n_latents, f'Expected {self.model.n_latents} latents, got {len(x)}'
-        assert len(embed) == self.model.n_latents, f'Expected {self.model.n_latents} class vectors, got {len(class_label)}'
+        assert len(
+            embed) == self.model.n_latents, f'Expected {self.model.n_latents} class vectors, got {len(class_label)}'
 
         cond_vectors = [torch.cat((z, e), dim=1) for (z, e) in zip(x, embed)]
 
@@ -678,6 +686,16 @@ def get_model(name, output_class, device, **kwargs):
         model = StyleGAN(device, class_name=output_class)
     elif name == 'StyleGAN2':
         model = StyleGAN2(device, class_name=output_class)
+    elif name == 'VAE':
+        chk_path = os.path.join(dirname(__file__), f"../../TimbreSpace/logs/VanillaVAE/version_12/checkpoints/last.ckpt")
+        print(chk_path)
+        chkpt = torch.load(chk_path, map_location=torch.device('cpu'))
+        # print(chkpt)
+        model = VAELightningModule.load_from_checkpoint(checkpoint_path=chk_path,
+                                                map_location=torch.device('cpu'),
+                                                vae_model= VanillaVAE(**{'name': 'VanillaVAE', 'in_channels': 3, 'latent_dim': 128}),
+                                                params={'LR': 0.005, 'weight_decay': 0.0, 'scheduler_gamma': 0.95, 'kld_weight': 0.00025, 'manual_seed': 1265})
+
     else:
         raise RuntimeError(f'Unknown model {name}')
 

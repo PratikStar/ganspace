@@ -123,14 +123,52 @@ def make_grid(latent, lat_mean, lat_comp, lat_stdev, act_mean, act_comp, act_std
 ######################
 ### Visualize results
 ######################
+# What worked on local:
+# python3 visualize.py --model 'StyleGAN2' --class 'ffhq' --use_w --layer 'style' -b 100
+# z: latent vector
+# BigGAN: intermidiate layers take latent vectors
+#   y_i = Gi(y_(i-1), z)
+# StyleGAN the output is controlled by a non-linear function of z as input to intermediate layers
+#   y_i = Gi(y_(i-1), w)    where w = M(z)  (M is 8-layer perceptron)
 
+# feature space == activation space == the partial forwarded vector space
+#   X = activation = feature space
 if __name__ == '__main__':
     global max_batch, sample_shape, feature_shape, inst, args, layer_key, model
 
-    args = Config().from_args()
+    # setting up the input
+    # args = Config().from_args()
+    args_dict_vae =  { # for interactive mode
+        "model": "VAE",
+        "layer": "model.decoder_input",
+        "output_class": "husky",
+        "batch_size": 100,
+        "n": 1000,
+        # "use_w": True
+    }
+    args_dict =  { # for interactive mode
+        "model": "StyleGAN2",
+        "layer": "style",
+        "output_class": "ffhq",
+        "batch_size": 100,
+        "n": 1000,
+        "use_w": True
+    }
+    args_dict_biggan =  { # for interactive mode
+        "model": "BigGAN-512",
+        "layer": "generator.gen_z",
+        "output_class": "husky",
+        "batch_size": 100,
+        "n": 1000,
+        # "use_w": True
+    }
+    args = Config().from_dict(args_dict_vae)
+
     t_start = datetime.datetime.now()
     timestamp = lambda : datetime.datetime.now().strftime("%d.%m %H:%M")
-    print(f'[{timestamp()}] {args.model}, {args.layer}, {args.estimator}')
+    print(f'[{timestamp()}] Model: {args.model}, Layer:{args.layer}, PCA:{args.estimator}')
+
+
 
     # Ensure reproducibility
     torch.manual_seed(0) # also sets cuda seeds
@@ -145,14 +183,15 @@ if __name__ == '__main__':
     layer_key = args.layer
     layer_name = layer_key #layer_key.lower().split('.')[-1]
 
-    basedir = Path(__file__).parent.resolve()
-    outdir = basedir / 'out'
+    basedir = os.getcwd()
+    outdir = os.path.join(basedir, 'out')
 
     # Load model
     inst = get_instrumented_model(args.model, args.output_class, layer_key, device, use_w=args.use_w)
     model = inst.model
     feature_shape = inst.feature_shape[layer_key]
     latent_shape = model.get_latent_shape()
+    print('Latent shape:', latent_shape)
     print('Feature shape:', feature_shape)
 
     # Layout of activations
@@ -162,22 +201,41 @@ if __name__ == '__main__':
         axis_mask = np.array([0, 1, 1, 1]) # only batch fixed => whole activation volume used
 
     # Shape of sample passed to PCA
-    sample_shape = feature_shape*axis_mask
-    sample_shape[sample_shape == 0] = 1
+    sample_shape = feature_shape*axis_mask # dot product
+    sample_shape[sample_shape == 0] = 1 # wherever the value is 0, replace it with 1
+
+
+
+
 
     # Load or compute components
     dump_name = get_or_compute(args, inst)
     data = np.load(dump_name, allow_pickle=False) # does not contain object arrays
+
     X_comp = data['act_comp']
     X_global_mean = data['act_mean']
     X_stdev = data['act_stdev']
     X_var_ratio = data['var_ratio']
     X_stdev_random = data['random_stdevs']
+
     Z_global_mean = data['lat_mean']
     Z_comp = data['lat_comp']
     Z_stdev = data['lat_stdev']
+
     n_comp = X_comp.shape[0]
+
     data.close()
+
+
+    print(f'X_comp.shape: {X_comp.shape}')
+    print(f'X_global_mean.shape: {X_global_mean.shape}')
+    print(f'X_stdev.shape: {X_stdev.shape}')
+    print(f'X_var_ratio.shape: {X_var_ratio.shape}')
+    print(f'X_stdev_random.shape: {X_stdev_random.shape}')
+
+    print(f'Z_global_mean shape: {Z_global_mean.shape}')
+    print(f'Z_comp.shape: {Z_comp.shape}')
+    print(f'Z_stdev.shape: {Z_stdev.shape}')
 
     # Transfer components to device
     tensors = SimpleNamespace(
@@ -210,9 +268,9 @@ if __name__ == '__main__':
 
     # Make output directories
     est_id = f'spca_{args.sparsity}' if args.estimator == 'spca' else args.estimator
-    outdir_comp = outdir/model.name/layer_key.lower()/est_id/'comp'
-    outdir_inst = outdir/model.name/layer_key.lower()/est_id/'inst'
-    outdir_summ = outdir/model.name/layer_key.lower()/est_id/'summ'
+    outdir_comp = os.path.join(outdir,model.name,layer_key.lower(),est_id,'comp')
+    outdir_inst = os.path.join(outdir,model.name,layer_key.lower(),est_id,'inst')
+    outdir_summ = os.path.join(outdir,model.name,layer_key.lower(),est_id,'summ')
     makedirs(outdir_comp, exist_ok=True)
     makedirs(outdir_inst, exist_ok=True)
     makedirs(outdir_summ, exist_ok=True)
@@ -245,13 +303,14 @@ if __name__ == '__main__':
         plt.suptitle(f"{args.estimator.upper()}: {model.name} - {layer_name}, {get_edit_name(edit_mode)} edit", size=16)
         make_grid(tensors.Z_global_mean, tensors.Z_global_mean, tensors.Z_comp, tensors.Z_stdev, tensors.X_global_mean,
             tensors.X_comp, tensors.X_stdev, scale=args.sigma, edit_type=edit_mode, n_rows=14)
-        plt.savefig(outdir_summ / f'components_{get_edit_name(edit_mode)}.jpg', dpi=300)
-        show()
+        plt.savefig(os.path.join(outdir_summ, f'components_{get_edit_name(edit_mode)}.jpg'), dpi=300)
+        # show()
+    exit()
 
     if args.make_video:
         components = 15
         instances = 150
-        
+
         # One reasonable, one over the top
         for sigma in [args.sigma, 3*args.sigma]:
             for c in range(components):
@@ -262,20 +321,20 @@ if __name__ == '__main__':
 
                     frames = [x for _, x in frames]
                     frames = frames + frames[::-1]
-                    make_mp4(frames, 5, outdir_comp / f'{get_edit_name(edit_mode)}_sigma{sigma}_comp{c}.mp4')
+                    make_mp4(frames, 5, os.path.join(outdir_comp, f'{get_edit_name(edit_mode)}_sigma{sigma}_comp{c}.mp4'))
 
-    
+
     # Summary grid, random directions
     # Using the stdevs of the principal components for same norm
     random_dirs_act = torch.from_numpy(get_random_dirs(n_comp, np.prod(sample_shape)).reshape(-1, *sample_shape)).to(device)
     random_dirs_z = torch.from_numpy(get_random_dirs(n_comp, np.prod(inst.input_shape)).reshape(-1, *latent_shape)).to(device)
-    
+
     for edit_mode in edit_modes:
         plt.figure(figsize = (14,12))
         plt.suptitle(f"{model.name} - {layer_name}, random directions w/ PC stdevs, {get_edit_name(edit_mode)} edit", size=16)
         make_grid(tensors.Z_global_mean, tensors.Z_global_mean, random_dirs_z, tensors.Z_stdev,
             tensors.X_global_mean, random_dirs_act, tensors.X_stdev, scale=args.sigma, edit_type=edit_mode, n_rows=14)
-        plt.savefig(outdir_summ / f'random_dirs_{get_edit_name(edit_mode)}.jpg', dpi=300)
+        plt.savefig(os.path.join(outdir_summ, f'random_dirs_{get_edit_name(edit_mode)}.jpg'), dpi=300)
         show()
 
     # Random instances w/ components added
@@ -292,13 +351,13 @@ if __name__ == '__main__':
             plt.suptitle(f"{args.estimator.upper()}: {model.name} - {layer_name}, {get_edit_name(edit_mode)} edit", size=16)
             make_grid(z, tensors.Z_global_mean, tensors.Z_comp, tensors.Z_stdev,
                 tensors.X_global_mean, tensors.X_comp, tensors.X_stdev, scale=args.sigma, edit_type=edit_mode, n_rows=14)
-            plt.savefig(outdir_summ / f'samp{img_idx}_real_{get_edit_name(edit_mode)}.jpg', dpi=300)
+            plt.savefig(os.path.join(outdir_summ, f'samp{img_idx}_real_{get_edit_name(edit_mode)}.jpg'), dpi=300)
             show()
 
         if args.make_video:
             components = 5
             instances = 150
-            
+
             # One reasonable, one over the top
             for sigma in [args.sigma, 3*args.sigma]: #[2, 5]:
                 for edit_mode in edit_modes:
@@ -309,6 +368,6 @@ if __name__ == '__main__':
                     for c in range(components):
                         frames = [x for _, x in imgs[c*instances:(c+1)*instances]]
                         frames = frames + frames[::-1]
-                        make_mp4(frames, 5, outdir_inst / f'{get_edit_name(edit_mode)}_sigma{sigma}_img{img_idx}_comp{c}.mp4')
+                        make_mp4(frames, 5, os.path.join(outdir_inst, f'{get_edit_name(edit_mode)}_sigma{sigma}_img{img_idx}_comp{c}.mp4'))
 
     print('Done in', datetime.datetime.now() - t_start)

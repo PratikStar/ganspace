@@ -50,8 +50,8 @@ def get_max_batch_size(inst, device, layer_name=None):
     inst.remove_edits()
 
     # Reset statistics
-    torch.cuda.reset_max_memory_cached(device)
-    torch.cuda.reset_max_memory_allocated(device)
+    # torch.cuda.reset_max_memory_cached(device)
+    # torch.cuda.reset_max_memory_allocated(device)
     total_mem = torch.cuda.get_device_properties(device).total_memory
 
     B_max = 20
@@ -152,6 +152,7 @@ def compute(config, dump_name, instrumented_model):
 
     timestamp = lambda : datetime.datetime.now().strftime("%d.%m %H:%M")
     print(f'[{timestamp()}] Computing', dump_name.name)
+    print(config)
 
     # Ensure reproducibility
     torch.manual_seed(0) # also sets cuda seeds
@@ -171,7 +172,7 @@ def compute(config, dump_name, instrumented_model):
         print('Reusing InstrumentedModel instance')
         inst = instrumented_model
         model = inst.model
-        inst.remove_edits()
+        inst.remove_edits() # TODO need to check what this is
         model.set_output_class(config.output_class)
 
     # Regress back to w space
@@ -179,34 +180,46 @@ def compute(config, dump_name, instrumented_model):
         print('Using W latent space')
         model.use_w()
 
+    print(f'Retaining layer: {layer_key}')
+
     inst.retain_layer(layer_key)
+    print('Doing partial forward')
     model.partial_forward(model.sample_latent(1), layer_key)
+    # print(f'Retained features: {str(inst.retained_features())}')
     sample_shape = inst.retained_features()[layer_key].shape
     sample_dims = np.prod(sample_shape)
     print('Feature shape:', sample_shape)
+    print('sample_dims:', sample_dims)
 
     input_shape = inst.model.get_latent_shape()
     input_dims = inst.model.get_latent_dims()
 
+    print('Input shape:', input_shape)
+    print('input_dims:', input_dims)
+
     config.components = min(config.components, sample_dims)
     transformer = get_estimator(config.estimator, config.components, config.sparsity)
+    print(f'Components to keep: {config.components}')
 
     X = None
     X_global_mean = None
 
     # Figure out batch size if not provided
-    B = config.batch_size or get_max_batch_size(inst, device, layer_key)
+    B = config.batch_size # or get_max_batch_size(inst, device, layer_key) # this gives error on local
 
     # Divisible by B (ignored in output name)
-    N = config.n // B * B
+    N = config.n // B * B # making N divisible by batchsize
 
     # Compute maximum batch size based on RAM + pagefile budget
-    target_bytes = 20 * 1_000_000_000 # GB
-    feat_size_bytes = sample_dims * np.dtype('float64').itemsize
+    target_bytes = 20 * 1_000_000_000 # GB TODO: I don;t know why 20GB is taken here
+
+    feat_size_bytes = sample_dims * np.dtype('float64').itemsize # feat_size_bytes= 512 * 8
     N_limit_RAM = np.floor_divide(target_bytes, feat_size_bytes)
+
     if not transformer.batch_support and N > N_limit_RAM:
         print('WARNING: estimator does not support batching, ' \
             'given config will use {:.1f} GB memory.'.format(feat_size_bytes / 1_000_000_000 * N))
+
 
     # 32-bit LAPACK gets very unhappy about huge matrices (in linalg.svd)
     if config.estimator == 'ica':
@@ -217,24 +230,34 @@ def compute(config, dump_name, instrumented_model):
     print('B={}, N={}, dims={}, N/dims={:.1f}'.format(B, N, sample_dims, N/sample_dims), flush=True)
 
     # Must not depend on chosen batch size (reproducibility)
-    NB = max(B, max(2_000, 3*config.components)) # ipca: as large as possible!
+    NB = max(B, max(2_000, 3*config.components)) # ipca: as large as possible! TODO: Don't know what NB is used for
     
     samples = None
+
+
     if not transformer.batch_support:
         samples = np.zeros((N + NB, sample_dims), dtype=np.float32)
 
     torch.manual_seed(config.seed or SEED_SAMPLING)
     np.random.seed(config.seed or SEED_SAMPLING)
+    ## All settings done. Models, shapes, memory sizes
+
+
+
+
+
 
     # Use exactly the same latents regardless of batch size
     # Store in main memory, since N might be huge (1M+)
     # Run in batches, since sample_latent() might perform Z -> W mapping
     n_lat = ((N + NB - 1) // B + 1) * B
-    latents = np.zeros((n_lat, *input_shape[1:]), dtype=np.float32)
+    latents = np.zeros((n_lat, *input_shape[1:]), dtype=np.float32) # Shape: (302000, 512)
+
     with torch.no_grad():
         for i in trange(n_lat // B, desc='Sampling latents'):
             latents[i*B:(i+1)*B] = model.sample_latent(n_samples=B).cpu().numpy()
-
+    print(latents.shape)
+    # exit()
     # Decomposition on non-Gaussian latent space
     samples_are_latents = layer_key in ['g_mapping', 'style'] and inst.model.latent_space_name() == 'W'
 
@@ -368,6 +391,7 @@ def get_or_compute(config, model=None, submit_config=None, force_recompute=False
     return _compute(submit_config, config, model, force_recompute)
 
 def _compute(submit_config, config, model=None, force_recompute=False):
+    print(config)
     basedir = Path(submit_config.run_dir)
     outdir = basedir / 'out'
     
@@ -381,6 +405,7 @@ def _compute(submit_config, config, model=None, force_recompute=False):
         raise RuntimeError(f'Cannot change latent space of non-StyleGAN model {config.model}')
 
     transformer = get_estimator(config.estimator, config.components, config.sparsity)
+    print(transformer)
     dump_name = "{}-{}_{}_{}_n{}{}{}.npz".format(
         config.model.lower(),
         config.output_class.replace(' ', '_'),
@@ -390,9 +415,9 @@ def _compute(submit_config, config, model=None, force_recompute=False):
         '_w' if config.use_w else '',
         f'_seed{config.seed}' if config.seed else ''
     )
-
+    print(dump_name)
     dump_path = basedir / 'cache' / 'components' / dump_name
-
+    # force_recompute =True
     if not dump_path.is_file() or force_recompute:
         print('Not cached')
         t_start = datetime.datetime.now()

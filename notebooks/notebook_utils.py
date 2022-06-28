@@ -69,13 +69,19 @@ def _create_strip_batch_sigma(inst, mode, layer, latents, x_comp, z_comp, act_st
             zeroing_offset_lat = 0
             if center:
                 if mode == 'activation':
+                    print('Mode activation')
                     # Center along activation before applying offset
                     inst.retain_layer(layer)
                     _ = inst.model.sample_np(z_single)
                     value = inst.retained_features()[layer].clone()
+                    print('notebook_utils._create_strip_batch_sigma dump')
+                    print(f'activation feature size: {value.size()}')
+                    print(f'activation mean size: {act_mean.size()}')
+                    print(f'PCA component size: {x_comp.size()}')
                     dotp = torch.sum((value - act_mean)*normalize(x_comp), dim=-1, keepdim=True)
                     zeroing_offset_act = normalize(x_comp)*dotp # offset that sets coordinate to zero
                 else:
+                    print('Mode Latent')
                     # Shift latent to lie on mean along given component
                     dotp = torch.sum((z_single - lat_mean)*normalize(z_comp), dim=-1, keepdim=True)
                     zeroing_offset_lat = dotp*normalize(z_comp)
